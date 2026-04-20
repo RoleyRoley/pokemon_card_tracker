@@ -13,8 +13,8 @@ def calculate_listing_stats(listings):
 
     return ListingStats(
         count=len(listings),
-        lowest_price=min(prices),
-        highest_price=max(prices),
+        lowest_price=round(min(prices), 2),
+        highest_price=round(max(prices), 2),
         average_price=round(mean(prices), 2),
-        median_price=round(median(prices), 2)
+        median_price=round(median(prices), 2),
     )

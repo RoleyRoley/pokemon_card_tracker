@@ -1,19 +1,26 @@
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 
 from app.models.schemas import CardSearchRequest, CardSearchResponse
+from app.services.ebay_search import EbayBlockedError
 from app.services.stats import calculate_listing_stats
+from app.services.ebay_search import search_ebay_listings
 
 router = APIRouter()
 
 
 @router.post("/search", response_model=CardSearchResponse)
 async def search_card_prices(payload: CardSearchRequest):
-    sold_listings = []
-    stats = calculate_listing_stats(sold_listings)
+    try:
+        sold_results, unsold_results, query_used = await search_ebay_listings(payload)
+        stats = calculate_listing_stats(sold_results)
 
-    return CardSearchResponse(
-        query_used=payload.card_name,
-        sold_listings=sold_listings,
-        sold_stats=stats,
-        unsold_listings=[],
-    )
+        return CardSearchResponse(
+            query_used=query_used,
+            sold_listings=sold_results,
+            sold_stats=stats,
+            unsold_listings=unsold_results,
+        )
+    except EbayBlockedError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc

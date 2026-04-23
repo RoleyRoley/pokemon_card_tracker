@@ -31,6 +31,31 @@ class EbayApiError(RuntimeError):
     pass
 
 
+def _extract_ebay_error_details(response: httpx.Response) -> str:
+    try:
+        payload = response.json()
+    except ValueError:
+        text = (response.text or "").strip()
+        return text[:300] if text else "No response body"
+
+    if isinstance(payload, dict):
+        errors = payload.get("errors")
+        if isinstance(errors, list) and errors:
+            first = errors[0] if isinstance(errors[0], dict) else {}
+            code = first.get("errorId") or first.get("errorCode") or "unknown"
+            message = first.get("message") or first.get("longMessage") or str(first)
+            return f"code={code}, message={message}"
+
+        error = payload.get("error")
+        description = payload.get("error_description")
+        if error or description:
+            return f"error={error}, description={description}"
+
+        return str(payload)[:300]
+
+    return str(payload)[:300]
+
+
 
 
 def _get_api_credentials() -> tuple[str | None, str | None]:
@@ -104,9 +129,10 @@ async def fetch_oauth_token(client_id: str, client_secret: str) -> str:
         )
 
     if response.status_code >= 400:
+        details = _extract_ebay_error_details(response)
         raise EbayApiAuthError(
             "Unable to authenticate with eBay API. Check EBAY_CLIENT_ID and "
-            "EBAY_CLIENT_SECRET."
+            f"EBAY_CLIENT_SECRET. HTTP {response.status_code}. eBay response: {details}"
         )
 
     token = response.json().get("access_token")
@@ -196,7 +222,10 @@ async def browse_search(
         response = await client.get(EBAY_BROWSE_SEARCH_URL, headers=headers, params=params)
 
     if response.status_code >= 400:
-        raise EbayApiError("eBay Browse API search failed")
+        details = _extract_ebay_error_details(response)
+        raise EbayApiError(
+            f"eBay Browse API search failed. HTTP {response.status_code}. eBay response: {details}"
+        )
 
     data = response.json()
     item_summaries = data.get("itemSummaries") or []

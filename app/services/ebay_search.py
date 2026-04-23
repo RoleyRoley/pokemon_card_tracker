@@ -121,6 +121,21 @@ def _sort_listings_by_date_desc(listings: list[EbayListing]) -> list[EbayListing
     )
 
 
+def _browse_search_filter(sold_only: bool) -> str:
+    filters = [f"soldItemsOnly:{str(sold_only).lower()}"]
+    # The Browse API defaults to FIXED_PRICE only; include auction/best-offer listings
+    # so sold results more closely match what users see on eBay itself.
+    filters.append("buyingOptions:{FIXED_PRICE|AUCTION|BEST_OFFER}")
+    return ",".join(filters)
+
+
+def _browse_result_limit(max_results: int, sold_only: bool) -> int:
+    if sold_only:
+        # Fetch a broader window, then filter/sort locally by recency.
+        return 200
+    return max(1, min(max_results, 200))
+
+
 
 
 def _get_api_credentials() -> tuple[str | None, str | None]:
@@ -295,8 +310,8 @@ async def browse_search(
     }
     params = {
         "q": query,
-        "limit": max(1, min(max_results, 200)),
-        "filter": f"soldItemsOnly:{str(sold_only).lower()}",
+        "limit": _browse_result_limit(max_results, sold_only),
+        "filter": _browse_search_filter(sold_only),
     }
 
     async with httpx.AsyncClient(timeout=20.0) as client:

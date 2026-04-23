@@ -161,6 +161,17 @@ def test_filter_relevant_listings_requires_card_terms():
     assert filtered[0].title == "Charizard Base Set 4/102"
 
 
+def test_browse_search_filter_includes_all_common_buying_options():
+    result = ebay_search._browse_search_filter(sold_only=True)
+
+    assert result == "soldItemsOnly:true,buyingOptions:{FIXED_PRICE|AUCTION|BEST_OFFER}"
+
+
+def test_browse_result_limit_fetches_broader_window_for_sold_searches():
+    assert ebay_search._browse_result_limit(5, sold_only=True) == 200
+    assert ebay_search._browse_result_limit(5, sold_only=False) == 5
+
+
 def test_search_ebay_listings_api_filters_and_sorts_newest_first(monkeypatch):
     monkeypatch.setenv("EBAY_CLIENT_ID", "id")
     monkeypatch.setenv("EBAY_CLIENT_SECRET", "secret")

@@ -50,7 +50,7 @@ def test_parse_browse_items_uses_fallback_date_for_sold_items():
     assert listings[0].date_text == "2026-04-21T10:30:00.000Z"
 
 
-def test_search_ebay_listings_uses_api_when_credentials_present(monkeypatch):
+def test_search_ebay_listings_uses_scraped_sold_and_api_unsold_when_credentials_present(monkeypatch):
     monkeypatch.setenv("EBAY_CLIENT_ID", "id")
     monkeypatch.setenv("EBAY_CLIENT_SECRET", "secret")
 
@@ -69,7 +69,7 @@ def test_search_ebay_listings_uses_api_when_credentials_present(monkeypatch):
         sold=False,
     )
 
-    async def fake_fetch_sold_listings_via_api(query: str, max_results: int):
+    async def fake_fetch_sold_listings(query: str, max_results: int):
         assert "Pikachu" in query
         assert max_results == 5
         return [sold_listing]
@@ -81,8 +81,8 @@ def test_search_ebay_listings_uses_api_when_credentials_present(monkeypatch):
 
     monkeypatch.setattr(
         ebay_search,
-        "fetch_sold_listings_via_api",
-        fake_fetch_sold_listings_via_api,
+        "fetch_sold_listings",
+        fake_fetch_sold_listings,
     )
     monkeypatch.setattr(
         ebay_search,
@@ -172,11 +172,16 @@ def test_browse_result_limit_fetches_broader_window_for_sold_searches():
     assert ebay_search._browse_result_limit(5, sold_only=False) == 5
 
 
-def test_search_ebay_listings_api_filters_and_sorts_newest_first(monkeypatch):
+def test_sold_scrape_parse_limit_fetches_more_candidates_for_filtering():
+    assert ebay_search._sold_scrape_parse_limit(5) == 50
+    assert ebay_search._sold_scrape_parse_limit(20) == 100
+
+
+def test_search_ebay_listings_filters_scraped_sold_results(monkeypatch):
     monkeypatch.setenv("EBAY_CLIENT_ID", "id")
     monkeypatch.setenv("EBAY_CLIENT_SECRET", "secret")
 
-    async def fake_fetch_sold_listings_via_api(query: str, max_results: int):
+    async def fake_fetch_sold_listings(query: str, max_results: int):
         assert max_results == 5
         return [
             EbayListing(
@@ -184,7 +189,7 @@ def test_search_ebay_listings_api_filters_and_sorts_newest_first(monkeypatch):
                 price=100.0,
                 currency="GBP",
                 listing_url="https://example.com/old",
-                date_text="2026-04-20T10:00:00.000Z",
+                date_text="Sold Apr 20, 2026",
                 sold=True,
             ),
             EbayListing(
@@ -200,15 +205,15 @@ def test_search_ebay_listings_api_filters_and_sorts_newest_first(monkeypatch):
                 price=140.0,
                 currency="GBP",
                 listing_url="https://example.com/new",
-                date_text="2026-04-23T10:00:00.000Z",
+                date_text="Sold Apr 23, 2026",
                 sold=True,
             ),
         ]
 
     monkeypatch.setattr(
         ebay_search,
-        "fetch_sold_listings_via_api",
-        fake_fetch_sold_listings_via_api,
+        "fetch_sold_listings",
+        fake_fetch_sold_listings,
     )
 
     payload = CardSearchRequest(
@@ -221,6 +226,6 @@ def test_search_ebay_listings_api_filters_and_sorts_newest_first(monkeypatch):
     sold, unsold, _query = asyncio.run(ebay_search.search_ebay_listings(payload))
 
     assert len(sold) == 2
-    assert sold[0].listing_url == "https://example.com/new"
-    assert sold[1].listing_url == "https://example.com/old"
+    assert sold[0].listing_url == "https://example.com/old"
+    assert sold[1].listing_url == "https://example.com/new"
     assert unsold == []

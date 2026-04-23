@@ -136,6 +136,10 @@ def _browse_result_limit(max_results: int, sold_only: bool) -> int:
     return max(1, min(max_results, 200))
 
 
+def _sold_scrape_parse_limit(max_results: int) -> int:
+    return max(max_results * 5, 50)
+
+
 
 
 def _get_api_credentials() -> tuple[str | None, str | None]:
@@ -374,7 +378,7 @@ def is_ebay_challenge_page(html: str, final_url: str) -> bool:
 async def fetch_sold_listings(query: str, max_results: int) -> list[EbayListing]:
     url = build_sold_search_url(query)
     html = await fetch_html(url)
-    return parse_sold_listings_from_html(html, max_results)
+    return parse_sold_listings_from_html(html, _sold_scrape_parse_limit(max_results))
 
 
 async def search_ebay_listings(
@@ -387,15 +391,10 @@ async def search_ebay_listings(
         grade=payload.grade,
     )
 
-    if has_ebay_api_credentials():
-        sold_results = await fetch_sold_listings_via_api(
-            query=query_used,
-            max_results=payload.max_results,
-        )
-        sold_results = _sort_listings_by_date_desc(
-            _filter_relevant_listings(sold_results, payload.card_name)
-        )[: payload.max_results]
+    sold_results = await fetch_sold_listings(query=query_used, max_results=payload.max_results)
+    sold_results = _filter_relevant_listings(sold_results, payload.card_name)[: payload.max_results]
 
+    if has_ebay_api_credentials():
         unsold_results: list[EbayListing] = []
         if payload.include_unsold:
             unsold_results = await fetch_unsold_listings_via_api(
@@ -407,8 +406,6 @@ async def search_ebay_listings(
             )[: payload.max_results]
         return sold_results, unsold_results, query_used
 
-    sold_results = await fetch_sold_listings(query=query_used, max_results=payload.max_results)
-    sold_results = _filter_relevant_listings(sold_results, payload.card_name)[: payload.max_results]
     unsold_results = []
 
     return sold_results, unsold_results, query_used

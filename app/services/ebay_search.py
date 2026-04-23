@@ -234,6 +234,22 @@ def _shipping_text(item: dict) -> str | None:
     return f"{currency} {value:.2f} shipping"
 
 
+def _listing_date_text(item: dict, sold: bool) -> str | None:
+    # eBay responses are inconsistent across listing types; use a safe fallback chain.
+    if sold:
+        return (
+            item.get("itemEndDate")
+            or item.get("itemCreationDate")
+            or item.get("itemOriginDate")
+            or item.get("listingDate")
+        )
+    return (
+        item.get("itemCreationDate")
+        or item.get("itemOriginDate")
+        or item.get("listingDate")
+    )
+
+
 def parse_browse_items(items: list[dict], sold: bool) -> list[EbayListing]:
     parsed: list[EbayListing] = []
 
@@ -242,7 +258,7 @@ def parse_browse_items(items: list[dict], sold: bool) -> list[EbayListing]:
         listing_url = (item.get("itemWebUrl") or "").strip()
         image_url = (item.get("image") or {}).get("imageUrl")
         condition_text = item.get("condition")
-        date_text = item.get("itemEndDate") if sold else item.get("itemCreationDate")
+        date_text = _listing_date_text(item, sold)
         price, currency = _price_to_float(item.get("price"))
 
         if not title or not listing_url or price <= 0:

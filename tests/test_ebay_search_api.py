@@ -34,6 +34,22 @@ def test_parse_browse_items_maps_valid_items():
     assert listing.sold is True
 
 
+def test_parse_browse_items_uses_fallback_date_for_sold_items():
+    items = [
+        {
+            "title": "Gengar VMAX Fusion Strike 271/264",
+            "itemWebUrl": "https://www.ebay.co.uk/itm/456",
+            "price": {"value": "249.99", "currency": "GBP"},
+            "itemCreationDate": "2026-04-21T10:30:00.000Z",
+        }
+    ]
+
+    listings = ebay_search.parse_browse_items(items, sold=True)
+
+    assert len(listings) == 1
+    assert listings[0].date_text == "2026-04-21T10:30:00.000Z"
+
+
 def test_search_ebay_listings_uses_api_when_credentials_present(monkeypatch):
     monkeypatch.setenv("EBAY_CLIENT_ID", "id")
     monkeypatch.setenv("EBAY_CLIENT_SECRET", "secret")

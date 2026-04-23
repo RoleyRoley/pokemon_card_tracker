@@ -39,14 +39,14 @@ def test_search_ebay_listings_uses_api_when_credentials_present(monkeypatch):
     monkeypatch.setenv("EBAY_CLIENT_SECRET", "secret")
 
     sold_listing = EbayListing(
-        title="Sold Item",
+        title="Pikachu Pokemon Card",
         price=50.0,
         currency="GBP",
         listing_url="https://example.com/sold",
         sold=True,
     )
     active_listing = EbayListing(
-        title="Active Item",
+        title="Pikachu Pokemon Card",
         price=55.0,
         currency="GBP",
         listing_url="https://example.com/active",
@@ -93,7 +93,7 @@ def test_search_ebay_listings_falls_back_to_scraping_without_credentials(monkeyp
     monkeypatch.delenv("EBAY_CLIENT_SECRET", raising=False)
 
     sold_listing = EbayListing(
-        title="Sold Item",
+        title="Charizard Pokemon Card",
         price=50.0,
         currency="GBP",
         listing_url="https://example.com/sold",
@@ -118,4 +118,82 @@ def test_search_ebay_listings_falls_back_to_scraping_without_credentials(monkeyp
 
     assert "Charizard" in query
     assert sold == [sold_listing]
+    assert unsold == []
+
+
+def test_filter_relevant_listings_requires_card_terms():
+    listings = [
+        EbayListing(
+            title="Charizard Base Set 4/102",
+            price=120.0,
+            currency="GBP",
+            listing_url="https://example.com/1",
+            sold=True,
+        ),
+        EbayListing(
+            title="Blastoise Base Set 2/102",
+            price=80.0,
+            currency="GBP",
+            listing_url="https://example.com/2",
+            sold=True,
+        ),
+    ]
+
+    filtered = ebay_search._filter_relevant_listings(listings, "Charizard Base Set")
+
+    assert len(filtered) == 1
+    assert filtered[0].title == "Charizard Base Set 4/102"
+
+
+def test_search_ebay_listings_api_filters_and_sorts_newest_first(monkeypatch):
+    monkeypatch.setenv("EBAY_CLIENT_ID", "id")
+    monkeypatch.setenv("EBAY_CLIENT_SECRET", "secret")
+
+    async def fake_fetch_sold_listings_via_api(query: str, max_results: int):
+        assert max_results == 5
+        return [
+            EbayListing(
+                title="Charizard Base Set 4/102",
+                price=100.0,
+                currency="GBP",
+                listing_url="https://example.com/old",
+                date_text="2026-04-20T10:00:00.000Z",
+                sold=True,
+            ),
+            EbayListing(
+                title="Blastoise Base Set 2/102",
+                price=80.0,
+                currency="GBP",
+                listing_url="https://example.com/not-relevant",
+                date_text="2026-04-22T10:00:00.000Z",
+                sold=True,
+            ),
+            EbayListing(
+                title="Charizard Base Set 4/102",
+                price=140.0,
+                currency="GBP",
+                listing_url="https://example.com/new",
+                date_text="2026-04-23T10:00:00.000Z",
+                sold=True,
+            ),
+        ]
+
+    monkeypatch.setattr(
+        ebay_search,
+        "fetch_sold_listings_via_api",
+        fake_fetch_sold_listings_via_api,
+    )
+
+    payload = CardSearchRequest(
+        card_name="Charizard Base Set",
+        condition_type="raw",
+        include_unsold=False,
+        max_results=5,
+    )
+
+    sold, unsold, _query = asyncio.run(ebay_search.search_ebay_listings(payload))
+
+    assert len(sold) == 2
+    assert sold[0].listing_url == "https://example.com/new"
+    assert sold[1].listing_url == "https://example.com/old"
     assert unsold == []

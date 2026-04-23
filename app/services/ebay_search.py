@@ -1,4 +1,6 @@
 import os
+import re
+from datetime import datetime, timezone
 from urllib.parse import quote_plus
 
 import httpx
@@ -54,6 +56,69 @@ def _extract_ebay_error_details(response: httpx.Response) -> str:
         return str(payload)[:300]
 
     return str(payload)[:300]
+
+
+def _tokenize_text(text: str) -> set[str]:
+    return set(re.findall(r"[a-z0-9]+", text.lower()))
+
+
+def _required_card_terms(card_name: str) -> set[str]:
+    stop_words = {
+        "pokemon",
+        "card",
+        "cards",
+        "tcg",
+        "the",
+        "and",
+        "for",
+        "with",
+    }
+    terms = _tokenize_text(card_name)
+    # Keep meaningful tokens and set numbers while avoiding overly broad words.
+    return {
+        term
+        for term in terms
+        if term not in stop_words and (len(term) >= 3 or term.isdigit())
+    }
+
+
+def _is_relevant_listing_title(title: str, required_terms: set[str]) -> bool:
+    if not required_terms:
+        return True
+    title_terms = _tokenize_text(title)
+    return required_terms.issubset(title_terms)
+
+
+def _filter_relevant_listings(listings: list[EbayListing], card_name: str) -> list[EbayListing]:
+    required_terms = _required_card_terms(card_name)
+    return [
+        listing
+        for listing in listings
+        if _is_relevant_listing_title(listing.title, required_terms)
+    ]
+
+
+def _parse_iso_datetime(date_text: str | None) -> datetime:
+    if not date_text:
+        return datetime.min.replace(tzinfo=timezone.utc)
+
+    normalized = date_text.strip().replace("Z", "+00:00")
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError:
+        return datetime.min.replace(tzinfo=timezone.utc)
+
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+def _sort_listings_by_date_desc(listings: list[EbayListing]) -> list[EbayListing]:
+    return sorted(
+        listings,
+        key=lambda listing: _parse_iso_datetime(listing.date_text),
+        reverse=True,
+    )
 
 
 
@@ -296,15 +361,23 @@ async def search_ebay_listings(
             query=query_used,
             max_results=payload.max_results,
         )
+        sold_results = _sort_listings_by_date_desc(
+            _filter_relevant_listings(sold_results, payload.card_name)
+        )[: payload.max_results]
+
         unsold_results: list[EbayListing] = []
         if payload.include_unsold:
             unsold_results = await fetch_unsold_listings_via_api(
                 query=query_used,
                 max_results=payload.max_results,
             )
+            unsold_results = _sort_listings_by_date_desc(
+                _filter_relevant_listings(unsold_results, payload.card_name)
+            )[: payload.max_results]
         return sold_results, unsold_results, query_used
 
     sold_results = await fetch_sold_listings(query=query_used, max_results=payload.max_results)
+    sold_results = _filter_relevant_listings(sold_results, payload.card_name)[: payload.max_results]
     unsold_results = []
 
     return sold_results, unsold_results, query_used

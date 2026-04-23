@@ -1,3 +1,4 @@
+import os
 from urllib.parse import quote_plus
 
 import httpx
@@ -7,14 +8,46 @@ from app.services.parsers import parse_sold_listings_from_html
 from app.utils.query_builder import build_ebay_query
 
 
+# Constants for eBay API and scraping
+
 EBAY_UK_SEARCH_URL = "https://www.ebay.co.uk/sch/i.html"
+EBAY_OAUTH_URL = "https://api.ebay.com/identity/v1/oauth2/token"
+EBAY_BROWSE_SEARCH_URL = "https://api.ebay.com/buy/browse/v1/item_summary/search"
+
+EBAY_CLIENT_ID_ENV = "EBAY_CLIENT_ID"
+EBAY_CLIENT_SECRET_ENV = "EBAY_CLIENT_SECRET"
+EBAY_MARKETPLACE_ID_ENV = "EBAY_MARKETPLACE_ID"
 
 
 class EbayBlockedError(RuntimeError):
     pass
 
 
+class EbayApiAuthError(RuntimeError):
+    pass
+
+
+class EbayApiError(RuntimeError):
+    pass
+
+
+
+
+def _get_api_credentials() -> tuple[str | None, str | None]:
+    return os.getenv(EBAY_CLIENT_ID_ENV), os.getenv(EBAY_CLIENT_SECRET_ENV)
+
+
+def has_ebay_api_credentials() -> bool:
+    client_id, client_secret = _get_api_credentials()
+    return bool(client_id and client_secret)
+
+
+def get_marketplace_id() -> str:
+    return os.getenv(EBAY_MARKETPLACE_ID_ENV, "EBAY_GB")
+
+
 def build_sold_search_url(query: str) -> str:
+    
     """
     _nkw = keyword
     LH_Sold = sold items
@@ -40,6 +73,7 @@ async def fetch_html(url: str) -> str:
         "Accept-Language": "en-GB,en;q=0.9",
     }
 
+    
     async with httpx.AsyncClient(timeout=20.0, follow_redirects=True) as client:
         response = await client.get(url, headers=headers)
         response.raise_for_status()
@@ -52,6 +86,150 @@ async def fetch_html(url: str) -> str:
             )
 
         return html
+
+# Oauth token fetching and API search functions
+async def fetch_oauth_token(client_id: str, client_secret: str) -> str:
+    data = {
+        "grant_type": "client_credentials",
+        "scope": "https://api.ebay.com/oauth/api_scope",
+    }
+    headers = {"Content-Type": "application/x-www-form-urlencoded"}
+
+    async with httpx.AsyncClient(timeout=20.0) as client:
+        response = await client.post(
+            EBAY_OAUTH_URL,
+            data=data,
+            headers=headers,
+            auth=(client_id, client_secret),
+        )
+
+    if response.status_code >= 400:
+        raise EbayApiAuthError(
+            "Unable to authenticate with eBay API. Check EBAY_CLIENT_ID and "
+            "EBAY_CLIENT_SECRET."
+        )
+
+    token = response.json().get("access_token")
+    if not token:
+        raise EbayApiAuthError("eBay OAuth response did not include access_token")
+
+    return token
+
+
+def _price_to_float(price_data: dict | None) -> tuple[float, str]:
+    # Convert eBay API price dicts like {"value": "123.45", "currency": "GBP"} into (123.45, "GBP")
+    if not price_data:
+        return 0.0, "GBP"
+
+    value = price_data.get("value")
+    currency = price_data.get("currency", "GBP")
+
+    try:
+        return float(value), str(currency)
+    except (TypeError, ValueError):
+        return 0.0, str(currency)
+
+
+def _shipping_text(item: dict) -> str | None:
+    shipping_options = item.get("shippingOptions") or []
+    if not shipping_options:
+        return None
+
+    first_option = shipping_options[0]
+    shipping_cost = first_option.get("shippingCost") or {}
+    value, currency = _price_to_float(shipping_cost)
+    if value <= 0:
+        return "Free shipping"
+    return f"{currency} {value:.2f} shipping"
+
+
+def parse_browse_items(items: list[dict], sold: bool) -> list[EbayListing]:
+    parsed: list[EbayListing] = []
+
+    for item in items:
+        title = (item.get("title") or "").strip()
+        listing_url = (item.get("itemWebUrl") or "").strip()
+        image_url = (item.get("image") or {}).get("imageUrl")
+        condition_text = item.get("condition")
+        date_text = item.get("itemEndDate") if sold else item.get("itemCreationDate")
+        price, currency = _price_to_float(item.get("price"))
+
+        if not title or not listing_url or price <= 0:
+            continue
+
+        parsed.append(
+            EbayListing(
+                title=title,
+                price=price,
+                currency=currency,
+                listing_url=listing_url,
+                image_url=image_url,
+                condition_text=condition_text,
+                date_text=date_text,
+                shipping_text=_shipping_text(item),
+                sold=sold,
+            )
+        )
+
+    return parsed
+
+
+async def browse_search(
+    # This function is used by both sold and unsold API search functions, with the sold_only flag controlling the filter.
+    token: str,
+    query: str,
+    sold_only: bool,
+    max_results: int,
+) -> list[EbayListing]:
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "X-EBAY-C-MARKETPLACE-ID": get_marketplace_id(),
+        "Accept": "application/json",
+    }
+    params = {
+        "q": query,
+        "limit": max(1, min(max_results, 200)),
+        "filter": f"soldItemsOnly:{str(sold_only).lower()}",
+    }
+
+    async with httpx.AsyncClient(timeout=20.0) as client:
+        response = await client.get(EBAY_BROWSE_SEARCH_URL, headers=headers, params=params)
+
+    if response.status_code >= 400:
+        raise EbayApiError("eBay Browse API search failed")
+
+    data = response.json()
+    item_summaries = data.get("itemSummaries") or []
+    return parse_browse_items(item_summaries, sold=sold_only)
+
+
+async def fetch_sold_listings_via_api(query: str, max_results: int) -> list[EbayListing]:
+    # fetch sold listings using the eBay Browse API. 
+    client_id, client_secret = _get_api_credentials()
+    if not client_id or not client_secret:
+        raise EbayApiAuthError("Missing eBay API credentials")
+
+    token = await fetch_oauth_token(client_id, client_secret)
+    return await browse_search(
+        token=token,
+        query=query,
+        sold_only=True,
+        max_results=max_results,
+    )
+
+
+async def fetch_unsold_listings_via_api(query: str, max_results: int) -> list[EbayListing]:
+    client_id, client_secret = _get_api_credentials()
+    if not client_id or not client_secret:
+        raise EbayApiAuthError("Missing eBay API credentials")
+
+    token = await fetch_oauth_token(client_id, client_secret)
+    return await browse_search(
+        token=token,
+        query=query,
+        sold_only=False,
+        max_results=max_results,
+    )
 
 
 def is_ebay_challenge_page(html: str, final_url: str) -> bool:
@@ -84,12 +262,20 @@ async def search_ebay_listings(
         grade=payload.grade,
     )
 
-    sold_results = await fetch_sold_listings(
-        query=query_used,
-        max_results=payload.max_results,
-    )
+    if has_ebay_api_credentials():
+        sold_results = await fetch_sold_listings_via_api(
+            query=query_used,
+            max_results=payload.max_results,
+        )
+        unsold_results: list[EbayListing] = []
+        if payload.include_unsold:
+            unsold_results = await fetch_unsold_listings_via_api(
+                query=query_used,
+                max_results=payload.max_results,
+            )
+        return sold_results, unsold_results, query_used
 
-    # Unsold comes in Stage 3
-    unsold_results: list[EbayListing] = []
+    sold_results = await fetch_sold_listings(query=query_used, max_results=payload.max_results)
+    unsold_results = []
 
     return sold_results, unsold_results, query_used

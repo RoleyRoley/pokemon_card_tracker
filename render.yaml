@@ -1,0 +1,20 @@
+services:
+  - type: web
+    name: pokemon-card-tracker-api
+    runtime: python
+    plan: free
+    region: frankfurt
+    rootDir: .
+    buildCommand: pip install -r app/requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /
+    autoDeploy: true
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.8
+      - key: EBAY_MARKETPLACE_ID
+        value: EBAY_GB
+      - key: EBAY_CLIENT_ID
+        sync: false
+      - key: EBAY_CLIENT_SECRET
+        sync: false

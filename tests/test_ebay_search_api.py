@@ -1,4 +1,5 @@
 import asyncio
+import pytest
 
 from app.models.schemas import CardSearchRequest, EbayListing
 from app.services import ebay_search
@@ -50,7 +51,7 @@ def test_parse_browse_items_uses_fallback_date_for_sold_items():
     assert listings[0].date_text == "2026-04-21T10:30:00.000Z"
 
 
-def test_search_ebay_listings_uses_scraped_sold_and_api_unsold_when_credentials_present(monkeypatch):
+def test_search_ebay_listings_uses_api_for_sold_and_unsold_when_credentials_present(monkeypatch):
     monkeypatch.setenv("EBAY_CLIENT_ID", "id")
     monkeypatch.setenv("EBAY_CLIENT_SECRET", "secret")
 
@@ -104,24 +105,9 @@ def test_search_ebay_listings_uses_scraped_sold_and_api_unsold_when_credentials_
     assert unsold == [active_listing]
 
 
-def test_search_ebay_listings_falls_back_to_scraping_without_credentials(monkeypatch):
+def test_search_ebay_listings_raises_auth_error_without_credentials(monkeypatch):
     monkeypatch.delenv("EBAY_CLIENT_ID", raising=False)
     monkeypatch.delenv("EBAY_CLIENT_SECRET", raising=False)
-
-    sold_listing = EbayListing(
-        title="Charizard Pokemon Card",
-        price=50.0,
-        currency="GBP",
-        listing_url="https://example.com/sold",
-        sold=True,
-    )
-
-    async def fake_fetch_sold_listings(query: str, max_results: int):
-        assert "Charizard" in query
-        assert max_results == 3
-        return [sold_listing]
-
-    monkeypatch.setattr(ebay_search, "fetch_sold_listings", fake_fetch_sold_listings)
 
     payload = CardSearchRequest(
         card_name="Charizard",
@@ -130,11 +116,8 @@ def test_search_ebay_listings_falls_back_to_scraping_without_credentials(monkeyp
         max_results=3,
     )
 
-    sold, unsold, query = asyncio.run(ebay_search.search_ebay_listings(payload))
-
-    assert "Charizard" in query
-    assert sold == [sold_listing]
-    assert unsold == []
+    with pytest.raises(ebay_search.EbayApiAuthError):
+        asyncio.run(ebay_search.search_ebay_listings(payload))
 
 
 def test_filter_relevant_listings_requires_card_terms():

@@ -1,6 +1,8 @@
 import os
 import re
+import importlib
 from datetime import datetime, timezone
+from pathlib import Path
 from urllib.parse import quote_plus
 
 import httpx
@@ -8,6 +10,25 @@ import httpx
 from app.models.schemas import CardSearchRequest, EbayListing
 from app.services.parsers import parse_sold_listings_from_html
 from app.utils.query_builder import build_ebay_query
+
+
+def _load_local_env_file() -> None:
+    """Load local .env variables when running outside Render."""
+    if os.getenv("RENDER"):
+        return
+
+    dotenv_module = importlib.util.find_spec("dotenv")
+    if dotenv_module is None:
+        return
+
+    project_root = Path(__file__).resolve().parents[2]
+    dotenv = importlib.import_module("dotenv")
+    load_dotenv = getattr(dotenv, "load_dotenv", None)
+    if callable(load_dotenv):
+        load_dotenv(project_root / ".env", override=False)
+
+
+_load_local_env_file()
 
 
 # Constants for eBay API and scraping
@@ -143,6 +164,8 @@ def _sold_scrape_parse_limit(max_results: int) -> int:
 
 
 def _get_api_credentials() -> tuple[str | None, str | None]:
+    # Re-load local .env on lookup so long-running dev servers pick up updates.
+    _load_local_env_file()
     return os.getenv(EBAY_CLIENT_ID_ENV), os.getenv(EBAY_CLIENT_SECRET_ENV)
 
 
@@ -173,28 +196,74 @@ def build_sold_search_url(query: str) -> str:
 
 
 async def fetch_html(url: str) -> str:
+    import asyncio
+    
     headers = {
         "User-Agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
             "AppleWebKit/537.36 (KHTML, like Gecko) "
             "Chrome/124.0.0.0 Safari/537.36"
         ),
-        "Accept-Language": "en-GB,en;q=0.9",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8",
+        "Accept-Language": "en-GB,en;q=0.9,en-US;q=0.8",
+        "Accept-Encoding": "gzip, deflate, br",
+        "DNT": "1",
+        "Connection": "keep-alive",
+        "Upgrade-Insecure-Requests": "1",
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "none",
+        "Sec-Fetch-User": "?1",
+        "Cache-Control": "max-age=0",
+        "Referer": "https://www.ebay.co.uk/",
+        "Priority": "u=0, i",
     }
 
-    
-    async with httpx.AsyncClient(timeout=20.0, follow_redirects=True) as client:
-        response = await client.get(url, headers=headers)
-        response.raise_for_status()
-        html = response.text
+    max_retries = 3
+    base_delay = 2  # seconds
 
-        if is_ebay_challenge_page(html, str(response.url)):
-            raise EbayBlockedError(
-                "eBay blocked the automated request with a browser challenge. "
-                "Try again later or use a browser-assisted scraping approach."
-            )
+    for attempt in range(max_retries):
+        try:
+            async with httpx.AsyncClient(
+                timeout=20.0, 
+                follow_redirects=True,
+                limits=httpx.Limits(max_keepalive_connections=5, max_connections=20)
+            ) as client:
+                response = await client.get(url, headers=headers)
+                
+                # Check for Service Unavailable or Too Many Requests
+                if response.status_code in [503, 429]:
+                    if attempt < max_retries - 1:
+                        delay = base_delay * (2 ** attempt)  # exponential backoff
+                        print(f"DEBUG: Got {response.status_code}, retrying in {delay}s (attempt {attempt + 1}/{max_retries})")
+                        await asyncio.sleep(delay)
+                        continue
+                    else:
+                        raise EbayBlockedError(
+                            f"eBay returned HTTP {response.status_code} after {max_retries} attempts. "
+                            "Server may be rate-limiting or temporarily unavailable."
+                        )
+                
+                response.raise_for_status()
+                html = response.text
 
-        return html
+                if is_ebay_challenge_page(html, str(response.url)):
+                    print(f"DEBUG: Challenge page detected. HTML preview: {html[:200]}")
+                    raise EbayBlockedError(
+                        "eBay blocked the automated request with a browser challenge. "
+                        "Try again later or use a browser-assisted scraping approach."
+                    )
+
+                return html
+        except (EbayBlockedError, EbayApiError):
+            raise
+        except Exception as e:
+            if attempt < max_retries - 1:
+                delay = base_delay * (2 ** attempt)
+                print(f"DEBUG: Request failed ({e}), retrying in {delay}s (attempt {attempt + 1}/{max_retries})")
+                await asyncio.sleep(delay)
+            else:
+                raise EbayApiError(f"Failed to fetch HTML after {max_retries} attempts: {str(e)}")
 
 # Oauth token fetching and API search functions
 async def fetch_oauth_token(client_id: str, client_secret: str) -> str:
@@ -365,20 +434,40 @@ def is_ebay_challenge_page(html: str, final_url: str) -> bool:
     lowered_html = html.lower()
     lowered_url = final_url.lower()
 
-    return any(
-        marker in lowered_html or marker in lowered_url
-        for marker in (
-            "pardon our interruption",
-            "checking your browser before you access ebay",
-            "/splashui/challenge",
-        )
-    )
+    # Only mark as challenge if we have DEFINITE markers in the actual content
+    # (not in comments or data attributes which might contain these strings)
+    
+    # Look for actual challenge page content in body/title
+    if "<title>" in html and "</title>" in html:
+        title_start = html.find("<title>") + 7
+        title_end = html.find("</title>")
+        if title_start < title_end:
+            title = html[title_start:title_end].lower()
+            if any(x in title for x in ["checking", "challenge", "verify", "robot", "bot"]):
+                return True
+    
+    # Look for specific error messages
+    if "pardon our interruption" in lowered_html:
+        return True
+    if "/splashui/challenge" in lowered_html or "splashui" in lowered_url:
+        return True
+    
+    # If we get redirected to a non-eBay domain, it's a challenge
+    if "ebay" not in lowered_url:
+        return True
+    
+    # Normal eBay pages have listings or search results
+    # If HTML is huge but has no typical listing markers, might be a challenge
+    if len(html) > 100000:  # Large page
+        # Check if it has SOME listing-like content
+        if "itm/" not in html and "item" not in lowered_html[:500]:
+            return True
+    
+    return False
 
 
 async def fetch_sold_listings(query: str, max_results: int) -> list[EbayListing]:
-    url = build_sold_search_url(query)
-    html = await fetch_html(url)
-    return parse_sold_listings_from_html(html, _sold_scrape_parse_limit(max_results))
+    return await fetch_sold_listings_via_api(query=query, max_results=max_results)
 
 
 async def search_ebay_listings(
@@ -391,21 +480,23 @@ async def search_ebay_listings(
         grade=payload.grade,
     )
 
+    if not has_ebay_api_credentials():
+        raise EbayApiAuthError(
+            "Missing eBay API credentials. Set EBAY_CLIENT_ID and EBAY_CLIENT_SECRET "
+            "for this runtime environment."
+        )
+
     sold_results = await fetch_sold_listings(query=query_used, max_results=payload.max_results)
     sold_results = _filter_relevant_listings(sold_results, payload.card_name)[: payload.max_results]
 
-    if has_ebay_api_credentials():
-        unsold_results: list[EbayListing] = []
-        if payload.include_unsold:
-            unsold_results = await fetch_unsold_listings_via_api(
-                query=query_used,
-                max_results=payload.max_results,
-            )
-            unsold_results = _sort_listings_by_date_desc(
-                _filter_relevant_listings(unsold_results, payload.card_name)
-            )[: payload.max_results]
-        return sold_results, unsold_results, query_used
-
-    unsold_results = []
+    unsold_results: list[EbayListing] = []
+    if payload.include_unsold:
+        unsold_results = await fetch_unsold_listings_via_api(
+            query=query_used,
+            max_results=payload.max_results,
+        )
+        unsold_results = _sort_listings_by_date_desc(
+            _filter_relevant_listings(unsold_results, payload.card_name)
+        )[: payload.max_results]
 
     return sold_results, unsold_results, query_used

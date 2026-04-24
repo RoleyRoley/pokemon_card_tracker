@@ -9,6 +9,16 @@ FastAPI service for searching Pokemon card listings and calculating sold listing
 .venv\Scripts\python.exe -m uvicorn app.main:app --reload
 ```
 
+To use the official eBay API locally, create a `.env` file in the project root:
+
+```env
+EBAY_CLIENT_ID=your_client_id
+EBAY_CLIENT_SECRET=your_client_secret
+EBAY_MARKETPLACE_ID=EBAY_GB
+```
+
+Local `.env` values are loaded automatically by the backend.
+
 Open http://127.0.0.1:8000
 
 ## Deploy on Render
